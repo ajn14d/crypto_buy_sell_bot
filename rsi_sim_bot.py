@@ -25,6 +25,9 @@ STOP_LOSS_PERCENT = 5.0  # Stop loss threshold %
 RECENT_DROP_THRESHOLD = 5.0  # Max allowed price drop % in last 15 intervals before buying
 LOOKBACK_PERIOD = 15  # Number of intervals to look back for recent drop
 
+# --- TAKE PROFIT VARIABLE ---
+TAKE_PROFIT_PERCENT = 3.0  # 3% take profit
+
 # --- VOLATILITY FILTER CONFIG ---
 VOLATILITY_LOOKBACK = 10  # Number of candles to calculate volatility over
 VOLATILITY_THRESHOLD = 1.5  # Minimum % price range to allow buying
@@ -93,14 +96,24 @@ def simulate_trade(pair, price, rsi, close_prices):
 
     holding = pair in portfolio['positions']
 
-    # Check stop loss if holding
     if holding:
         buy_price = portfolio['positions'][pair]['buy_price']
         loss_pct = ((price - buy_price) / buy_price) * 100
+        gain_pct = loss_pct  # same calculation reused
+
+        # Stop loss condition
         if loss_pct <= -STOP_LOSS_PERCENT:
             amount = portfolio['positions'][pair]['amount']
             portfolio['USDT'] += amount * price
             print(f"[{datetime.now()}] [STOP LOSS] SELL {pair} @ ${price:.2f} | Loss: {loss_pct:.2f}%")
+            del portfolio['positions'][pair]
+            return
+
+        # Take profit condition
+        if gain_pct >= TAKE_PROFIT_PERCENT:
+            amount = portfolio['positions'][pair]['amount']
+            portfolio['USDT'] += amount * price
+            print(f"[{datetime.now()}] [TAKE PROFIT] SELL {pair} @ ${price:.2f} | Gain: {gain_pct:.2f}%")
             del portfolio['positions'][pair]
             return
 
@@ -110,29 +123,19 @@ def simulate_trade(pair, price, rsi, close_prices):
     else:
         recent_drop = 0.0  # not enough data yet
 
-    # Calculate volatility over last VOLATILITY_LOOKBACK candles
-    if len(close_prices) >= VOLATILITY_LOOKBACK:
-        recent_closes = close_prices[-VOLATILITY_LOOKBACK:]
-        volatility = (max(recent_closes) - min(recent_closes)) / min(recent_closes) * 100
-    else:
-        volatility = 0.0
-
-    # Buy logic with volatility filter
+    # Buy logic
     if rsi < BUY_THRESHOLD and not holding:
         if recent_drop > -RECENT_DROP_THRESHOLD:
-            if volatility >= VOLATILITY_THRESHOLD:
-                usdt = portfolio['USDT']
-                amount = usdt / price
-                if amount > 0:
-                    portfolio['positions'][pair] = {'amount': amount, 'buy_price': price}
-                    portfolio['USDT'] = 0
-                    print(f"[{datetime.now()}] BUY {pair} @ ${price:.2f} | RSI={rsi:.2f} | Recent Drop={recent_drop:.2f}% | Volatility={volatility:.2f}%")
-            else:
-                print(f"[{datetime.now()}] Skipping buy {pair} due to low volatility: {volatility:.2f}%")
+            usdt = portfolio['USDT']
+            amount = (usdt * 0.5) / price  # Buy with 50% of available USDT
+            if amount > 0:
+                portfolio['positions'][pair] = {'amount': amount, 'buy_price': price}
+                portfolio['USDT'] -= amount * price
+                print(f"[{datetime.now()}] BUY {pair} @ ${price:.2f} | RSI={rsi:.2f} | Recent Drop={recent_drop:.2f}%")
         else:
             print(f"[{datetime.now()}] Skipping buy {pair} due to recent drop {recent_drop:.2f}%")
 
-    # Sell logic
+    # RSI sell logic
     elif rsi > SELL_THRESHOLD and holding:
         position = portfolio['positions'].pop(pair)
         value = position['amount'] * price
