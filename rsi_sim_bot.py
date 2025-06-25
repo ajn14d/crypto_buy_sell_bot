@@ -20,10 +20,11 @@ INTERVAL = 1  # in minutes
 RSI_PERIOD = 14
 BUY_THRESHOLD = 30
 SELL_THRESHOLD = 70
-STARTING_BALANCE = 202.00
+STARTING_BALANCE = 202.10
 STOP_LOSS_PERCENT = 5.0
 RECENT_DROP_THRESHOLD = 5.0
 LOOKBACK_PERIOD = 15
+MIN_TRADE_SIZE = 50  # minimum USD amount for any buy or sell
 
 # --- SIMULATED PORTFOLIO ---
 portfolio = {
@@ -37,12 +38,21 @@ price_history = {pair: [] for pair in TRADING_PAIRS}
 # --- RSI CALCULATION ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=period).mean()
-    avg_loss = pd.Series(loss).rolling(window=period).mean()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+
+    # Fix RSI when avg_loss == 0 (means rs = inf), set RSI = 100
+    rsi[avg_loss == 0] = 100
+
+    # Fix RSI when avg_gain == 0 and avg_loss == 0 (flat line), RSI = 50 neutral
+    rsi[(avg_gain == 0) & (avg_loss == 0)] = 50
+
     return rsi
 
 # --- OHLC FETCH ---
@@ -101,6 +111,12 @@ def simulate_buy(pair, price, rsi, close_prices):
 
     if rsi < BUY_THRESHOLD:
         amount_to_spend = portfolio['USDT'] * allocation_pct
+        
+        # --- New: Minimum trade size check ---
+        if amount_to_spend < MIN_TRADE_SIZE:
+            print(f"[{datetime.now()}] Skipping buy {pair} because allocation ${amount_to_spend:.2f} < minimum trade size ${MIN_TRADE_SIZE}")
+            return False
+
         amount = amount_to_spend / price
         if amount > 0 and amount_to_spend <= portfolio['USDT']:
             portfolio['positions'][pair] = {'amount': amount, 'buy_price': price}
@@ -123,17 +139,23 @@ def simulate_sell(pair, price, rsi):
     buy_price = portfolio['positions'][pair]['buy_price']
     amount = portfolio['positions'][pair]['amount']
     loss_pct = ((price - buy_price) / buy_price) * 100
+    trade_value = amount * price
+
+    # --- New: Minimum trade size check ---
+    if trade_value < MIN_TRADE_SIZE:
+        print(f"[{datetime.now()}] Skipping sell {pair} because trade value ${trade_value:.2f} < minimum trade size ${MIN_TRADE_SIZE}")
+        return False
 
     # Stop loss triggered
     if loss_pct <= -STOP_LOSS_PERCENT:
-        portfolio['USDT'] += amount * price
+        portfolio['USDT'] += trade_value
         print(f"[{datetime.now()}] [STOP LOSS] SELL {pair} @ ${price:.2f} | Loss: {loss_pct:.2f}%")
         del portfolio['positions'][pair]
         return True
 
     # Normal sell if RSI above threshold
     if rsi > SELL_THRESHOLD:
-        portfolio['USDT'] += amount * price
+        portfolio['USDT'] += trade_value
         profit = (price - buy_price) * amount
         print(f"[{datetime.now()}] SELL {pair} @ ${price:.2f} | RSI={rsi:.2f} | PnL=${profit:.2f}")
         del portfolio['positions'][pair]
